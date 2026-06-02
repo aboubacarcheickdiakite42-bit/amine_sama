@@ -8,10 +8,9 @@ import os
 import asyncio
 from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError
+from config import get_telethon_credentials
 
-API_ID = int(os.environ["TELEGRAM_API_ID"])
-API_HASH = os.environ["TELEGRAM_API_HASH"]
-PHONE = os.environ["TELEGRAM_PHONE"]
+API_ID, API_HASH, PHONE = get_telethon_credentials()
 
 SESSION_FILE = os.path.join(os.path.dirname(__file__), "userbot_session")
 
