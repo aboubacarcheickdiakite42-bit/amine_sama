@@ -5,8 +5,9 @@ Module de publication des animes sur le canal Telegram.
 import os
 import logging
 import asyncio
+import time
 from telegram import Bot
-from telegram.error import TelegramError
+from telegram.error import TelegramError, RetryAfter
 from telegram.constants import ParseMode
 
 logger = logging.getLogger(__name__)
@@ -79,40 +80,53 @@ def format_anime_message(anime: dict) -> str:
     return "\n".join(lines)
 
 
-async def send_anime_async(anime: dict) -> bool:
-    """Envoie un anime sur le canal Telegram de manière asynchrone."""
+async def send_anime_async(anime: dict, retries: int = 3) -> bool:
+    """Envoie un anime sur le canal Telegram avec gestion du rate-limit."""
     bot = Bot(token=BOT_TOKEN)
     message = format_anime_message(anime)
     image_url = anime.get("image")
 
+    for attempt in range(1, retries + 1):
+        try:
+            if image_url:
+                try:
+                    await bot.send_photo(
+                        chat_id=CHANNEL_ID,
+                        photo=image_url,
+                        caption=message,
+                        parse_mode=ParseMode.HTML,
+                    )
+                    logger.info(f"✅ Publié avec image: {anime.get('title')}")
+                    return True
+                except RetryAfter as e:
+                    raise
+                except TelegramError as e:
+                    logger.warning(f"Image échouée, tentative texte seul: {e}")
+
+            await bot.send_message(
+                chat_id=CHANNEL_ID,
+                text=message,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=False,
+            )
+            logger.info(f"✅ Publié (texte): {anime.get('title')}")
+            return True
+
+        except RetryAfter as e:
+            wait = int(e.retry_after) + 2
+            logger.warning(f"⏳ Rate-limit Telegram — attente de {wait}s (tentative {attempt}/{retries})")
+            await asyncio.sleep(wait)
+        except TelegramError as e:
+            logger.error(f"❌ Erreur publication Telegram (tentative {attempt}/{retries}): {e}")
+            if attempt < retries:
+                await asyncio.sleep(3)
+
+    logger.error(f"❌ Échec définitif après {retries} tentatives pour: {anime.get('title')}")
     try:
-        if image_url:
-            try:
-                await bot.send_photo(
-                    chat_id=CHANNEL_ID,
-                    photo=image_url,
-                    caption=message,
-                    parse_mode=ParseMode.HTML,
-                )
-                logger.info(f"✅ Publié avec image: {anime.get('title')}")
-                return True
-            except TelegramError as e:
-                logger.warning(f"Image échouée, tentative texte seul: {e}")
-
-        await bot.send_message(
-            chat_id=CHANNEL_ID,
-            text=message,
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=False,
-        )
-        logger.info(f"✅ Publié (texte): {anime.get('title')}")
-        return True
-
-    except TelegramError as e:
-        logger.error(f"❌ Erreur publication Telegram: {e}")
-        return False
-    finally:
         await bot.close()
+    except Exception:
+        pass
+    return False
 
 
 def send_anime(anime: dict) -> bool:
