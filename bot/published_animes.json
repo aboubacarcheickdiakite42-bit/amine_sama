@@ -1,8 +1,16 @@
 {
-  "published": {
-    "tongari boushi no atelier": "2026-06-02T22:35:56.831984",
-    "re:zero kara hajimeru isekai seikatsu 4th season": "2026-06-02T22:39:36.265499",
-    "youkoso jitsuryoku shijou shugi no kyoushitsu e 4th season: 2-nensei-hen 1 gakki": "2026-06-02T22:39:41.748570",
-    "tensei shitara slime datta ken 4th season": "2026-06-02T22:39:47.181194"
+  "animes": {
+    "51553": {
+      "title": "Tongari Boushi no Atelier",
+      "last_episode": 1,
+      "started_at": "2026-06-02T22:45:58.226912",
+      "updated_at": "2026-06-02T22:45:58.226912"
+    },
+    "61316": {
+      "title": "Re:Zero kara Hajimeru Isekai Seikatsu 4th Season",
+      "last_episode": 1,
+      "started_at": "2026-06-02T22:46:07.234967",
+      "updated_at": "2026-06-02T22:46:07.234967"
+    }
   }
 }

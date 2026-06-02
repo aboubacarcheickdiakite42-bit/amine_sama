@@ -1,13 +1,11 @@
 """
-Scraper pour trouver les animes disponibles en VF.
-Utilise plusieurs sources pour maximiser la couverture.
+Scraper pour récupérer les animes de la saison et leurs épisodes.
+Utilise l'API Jikan (MyAnimeList) comme source principale.
 """
 
 import requests
-from bs4 import BeautifulSoup
 import logging
-import json
-import re
+import time
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -24,231 +22,156 @@ HEADERS = {
 SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
 
+# Délai entre les appels Jikan pour respecter le rate limit (3 req/s)
+JIKAN_DELAY = 0.4
 
-def scrape_neko_sama() -> list[dict]:
-    """Scrape neko-sama.fr pour les derniers animes VF ajoutés."""
-    animes = []
-    try:
-        url = "https://www.neko-sama.fr/anime/info/latest"
-        resp = SESSION.get(url, timeout=10)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "lxml")
 
-        cards = soup.select(".anime-card, .card-anime, article.anime")
-        if not cards:
-            cards = soup.select("a[href*='/anime/info/']")
-
-        seen = set()
-        for card in cards[:20]:
-            try:
-                link_tag = card if card.name == "a" else card.find("a", href=True)
-                if not link_tag:
-                    continue
-                href = link_tag.get("href", "")
-                if "/anime/info/" not in href:
-                    continue
-
-                title_tag = card.find(["h3", "h2", "h4", ".title", ".name"])
-                title = title_tag.get_text(strip=True) if title_tag else link_tag.get_text(strip=True)
-                if not title or title in seen:
-                    continue
-
-                img_tag = card.find("img")
-                image = img_tag.get("src") or img_tag.get("data-src") if img_tag else None
-
-                full_url = href if href.startswith("http") else f"https://www.neko-sama.fr{href}"
-
-                lang_tag = card.find(string=re.compile(r"VF", re.I))
-                if lang_tag is None:
-                    badge = card.find(class_=re.compile(r"vf|lang", re.I))
-                    if badge is None:
-                        continue
-
-                seen.add(title)
-                animes.append({
-                    "title": title,
-                    "url": full_url,
-                    "image": image,
-                    "source": "neko-sama",
-                    "lang": "VF",
-                })
-            except Exception as e:
-                logger.debug(f"Erreur carte neko-sama: {e}")
+def _jikan_get(url: str, retries: int = 3) -> dict | None:
+    """Effectue un GET vers l'API Jikan avec retry et respect du rate limit."""
+    for attempt in range(1, retries + 1):
+        try:
+            time.sleep(JIKAN_DELAY)
+            resp = SESSION.get(url, timeout=15)
+            if resp.status_code == 429:
+                wait = int(resp.headers.get("Retry-After", 2))
+                logger.warning(f"Rate limit Jikan — attente {wait}s")
+                time.sleep(wait)
                 continue
-
-    except Exception as e:
-        logger.warning(f"Erreur scraping neko-sama: {e}")
-
-    return animes
-
-
-def scrape_anime_vf_org() -> list[dict]:
-    """Scrape animevf.cc pour les dernières sorties VF."""
-    animes = []
-    try:
-        url = "https://animevf.cc/"
-        resp = SESSION.get(url, timeout=10)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "lxml")
-
-        cards = soup.select(".last_episodes li, .items article, .anime-item, .item")
-        seen = set()
-        for card in cards[:20]:
-            try:
-                link_tag = card.find("a", href=True)
-                if not link_tag:
-                    continue
-
-                title_tag = card.find(["h3", "h2", ".name", ".title"])
-                title = title_tag.get_text(strip=True) if title_tag else link_tag.get("title", "")
-                if not title or title in seen:
-                    continue
-
-                img_tag = card.find("img")
-                image = None
-                if img_tag:
-                    image = img_tag.get("src") or img_tag.get("data-src") or img_tag.get("data-original")
-
-                href = link_tag["href"]
-                full_url = href if href.startswith("http") else f"https://animevf.cc{href}"
-
-                seen.add(title)
-                animes.append({
-                    "title": title,
-                    "url": full_url,
-                    "image": image,
-                    "source": "animevf",
-                    "lang": "VF",
-                })
-            except Exception as e:
-                logger.debug(f"Erreur carte animevf: {e}")
-                continue
-
-    except Exception as e:
-        logger.warning(f"Erreur scraping animevf: {e}")
-
-    return animes
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            logger.warning(f"Erreur Jikan (tentative {attempt}/{retries}) — {url}: {e}")
+            if attempt < retries:
+                time.sleep(2)
+    return None
 
 
-def scrape_jkanime_vf() -> list[dict]:
-    """Scrape une API publique d'animes (Jikan/MAL) pour les nouvelles sorties VF."""
-    animes = []
-    try:
-        url = "https://api.jikan.moe/v4/top/anime?filter=airing&limit=10"
-        resp = SESSION.get(url, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-
-        for item in data.get("data", [])[:10]:
-            try:
-                title_fr = item.get("title") or item.get("title_english") or ""
-                if not title_fr:
-                    continue
-                animes.append({
-                    "title": title_fr,
-                    "url": item.get("url", "https://myanimelist.net"),
-                    "image": item.get("images", {}).get("jpg", {}).get("large_image_url"),
-                    "source": "jikan-mal",
-                    "lang": "VF",
-                    "synopsis": item.get("synopsis", "")[:300] if item.get("synopsis") else "",
-                    "score": item.get("score"),
-                    "genres": [g["name"] for g in item.get("genres", [])[:3]],
-                    "episodes": item.get("episodes"),
-                    "status": item.get("status"),
-                    "aired": item.get("aired", {}).get("string", ""),
-                })
-            except Exception as e:
-                logger.debug(f"Erreur item jikan: {e}")
-                continue
-
-    except Exception as e:
-        logger.warning(f"Erreur scraping jikan: {e}")
-
-    return animes
+def get_current_season() -> tuple[int, str]:
+    """Retourne l'année et la saison actuelle."""
+    now = datetime.now()
+    year = now.year
+    month = now.month
+    if month in [1, 2, 3]:
+        season = "winter"
+    elif month in [4, 5, 6]:
+        season = "spring"
+    elif month in [7, 8, 9]:
+        season = "summer"
+    else:
+        season = "fall"
+    return year, season
 
 
-def get_latest_anime_vf(max_results: int = 5) -> list[dict]:
+def get_seasonal_animes(limit: int = 20) -> list[dict]:
     """
-    Récupère les derniers animes VF disponibles depuis plusieurs sources.
-    Retourne une liste dédupliquée.
+    Récupère les animes de la saison actuelle via Jikan.
+    Retourne une liste d'animes avec leurs métadonnées.
     """
-    all_animes = []
+    year, season = get_current_season()
+    url = f"https://api.jikan.moe/v4/seasons/{year}/{season}?limit={limit}"
+    data = _jikan_get(url)
 
-    # Source principale : Jikan/MAL API (fiable et sans blocage)
-    jikan_results = scrape_jikan_seasonal()
-    all_animes.extend(jikan_results)
+    if not data:
+        logger.error("Impossible de récupérer les animes saisonniers")
+        return []
 
-    # Sources de scraping secondaires
-    if len(all_animes) < max_results:
-        all_animes.extend(scrape_neko_sama())
-
-    if len(all_animes) < max_results:
-        all_animes.extend(scrape_anime_vf_org())
-
-    # Déduplier par titre
-    seen_titles = set()
-    unique = []
-    for anime in all_animes:
-        key = anime["title"].lower().strip()
-        if key not in seen_titles:
-            seen_titles.add(key)
-            unique.append(anime)
-
-    logger.info(f"Trouvé {len(unique)} animes uniques VF")
-    return unique[:max_results]
-
-
-def scrape_jikan_seasonal() -> list[dict]:
-    """Récupère les animes de la saison actuelle via Jikan API."""
     animes = []
-    try:
-        now = datetime.now()
-        year = now.year
-        month = now.month
-        if month in [1, 2, 3]:
-            season = "winter"
-        elif month in [4, 5, 6]:
-            season = "spring"
-        elif month in [7, 8, 9]:
-            season = "summer"
-        else:
-            season = "fall"
-
-        url = f"https://api.jikan.moe/v4/seasons/{year}/{season}?limit=15"
-        resp = SESSION.get(url, timeout=12)
-        resp.raise_for_status()
-        data = resp.json()
-
-        for item in data.get("data", [])[:15]:
-            try:
-                title = item.get("title") or item.get("title_english") or ""
-                if not title:
-                    continue
-
-                synopsis = item.get("synopsis", "") or ""
-                synopsis_short = synopsis[:280] + "..." if len(synopsis) > 280 else synopsis
-
-                animes.append({
-                    "title": title,
-                    "title_jp": item.get("title_japanese", ""),
-                    "url": item.get("url", "https://myanimelist.net"),
-                    "image": item.get("images", {}).get("jpg", {}).get("large_image_url"),
-                    "source": "jikan-seasonal",
-                    "lang": "VF",
-                    "synopsis": synopsis_short,
-                    "score": item.get("score"),
-                    "genres": [g["name"] for g in item.get("genres", [])[:3]],
-                    "episodes": item.get("episodes"),
-                    "status": item.get("status"),
-                    "studio": item.get("studios", [{}])[0].get("name", "") if item.get("studios") else "",
-                    "season": f"{season.capitalize()} {year}",
-                    "mal_id": item.get("mal_id"),
-                })
-            except Exception as e:
-                logger.debug(f"Erreur item seasonal: {e}")
+    for item in data.get("data", []):
+        try:
+            mal_id = item.get("mal_id")
+            title = item.get("title") or item.get("title_english") or ""
+            if not mal_id or not title:
                 continue
 
-    except Exception as e:
-        logger.warning(f"Erreur scraping jikan seasonal: {e}")
+            synopsis = item.get("synopsis") or ""
+            synopsis_short = synopsis[:280] + "..." if len(synopsis) > 280 else synopsis
 
+            animes.append({
+                "mal_id": mal_id,
+                "title": title,
+                "title_jp": item.get("title_japanese", ""),
+                "url": item.get("url", f"https://myanimelist.net/anime/{mal_id}"),
+                "image": item.get("images", {}).get("jpg", {}).get("large_image_url"),
+                "synopsis": synopsis_short,
+                "score": item.get("score"),
+                "genres": [g["name"] for g in item.get("genres", [])[:3]],
+                "total_episodes": item.get("episodes"),
+                "status": item.get("status", ""),
+                "studio": item.get("studios", [{}])[0].get("name", "") if item.get("studios") else "",
+                "season": f"{season.capitalize()} {year}",
+                "lang": "VF",
+            })
+        except Exception as e:
+            logger.debug(f"Erreur item saisonnier: {e}")
+            continue
+
+    logger.info(f"Saison {season} {year} : {len(animes)} animes récupérés")
     return animes
+
+
+def get_anime_episodes(mal_id: int) -> list[dict]:
+    """
+    Récupère la liste des épisodes d'un anime via Jikan.
+    Retourne uniquement les épisodes déjà diffusés (aired).
+    """
+    url = f"https://api.jikan.moe/v4/anime/{mal_id}/episodes?page=1"
+    data = _jikan_get(url)
+
+    if not data:
+        return []
+
+    episodes = []
+    for ep in data.get("data", []):
+        try:
+            ep_num = ep.get("mal_id")  # Jikan utilise mal_id pour le numéro d'épisode
+            if not ep_num:
+                continue
+
+            # Vérifier si l'épisode a été diffusé
+            aired_str = ep.get("aired")
+            if aired_str:
+                try:
+                    aired_dt = datetime.fromisoformat(aired_str.replace("Z", "+00:00"))
+                    if aired_dt.replace(tzinfo=None) > datetime.now():
+                        continue  # Épisode pas encore diffusé
+                except Exception:
+                    pass  # Si on ne peut pas parser la date, on suppose qu'il est disponible
+
+            ep_title = ep.get("title") or ep.get("title_romanji") or f"Épisode {ep_num}"
+
+            episodes.append({
+                "episode_num": ep_num,
+                "title": ep_title,
+                "title_jp": ep.get("title_japanese", ""),
+                "aired": aired_str,
+                "filler": ep.get("filler", False),
+                "recap": ep.get("recap", False),
+            })
+        except Exception as e:
+            logger.debug(f"Erreur épisode {ep}: {e}")
+            continue
+
+    return sorted(episodes, key=lambda x: x["episode_num"])
+
+
+def get_next_episode_to_publish(mal_id: int, last_published: int) -> dict | None:
+    """
+    Retourne le prochain épisode à publier pour un anime donné.
+    Si last_published=0, retourne l'épisode 1.
+    Retourne None si aucun nouvel épisode n'est disponible.
+    """
+    episodes = get_anime_episodes(mal_id)
+    if not episodes:
+        return None
+
+    target_ep = last_published + 1
+    for ep in episodes:
+        if ep["episode_num"] == target_ep:
+            return ep
+
+    # Si on ne trouve pas exactement le numéro, chercher le premier supérieur à last_published
+    for ep in episodes:
+        if ep["episode_num"] > last_published:
+            return ep
+
+    return None
