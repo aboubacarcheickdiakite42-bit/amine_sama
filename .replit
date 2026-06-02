@@ -39,12 +39,13 @@ outputType = "console"
 name = "Authentification Telegram"
 author = "agent"
 
+[workflows.workflow.metadata]
+outputType = "webview"
+
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "cd bot && python auth_session.py"
-
-[workflows.workflow.metadata]
-outputType = "console"
+args = "cd bot && python auth_web.py"
+waitForPort = 3000
 
 [agent]
 stack = "PNPM_WORKSPACE"
@@ -53,6 +54,10 @@ expertMode = true
 [postMerge]
 path = "scripts/post-merge.sh"
 timeoutMs = 20000
+
+[[ports]]
+localPort = 3000
+externalPort = 3000
 
 [[ports]]
 localPort = 8080
