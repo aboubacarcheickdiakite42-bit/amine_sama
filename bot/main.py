@@ -1,14 +1,12 @@
 """
 Bot Anime VF — Transfert automatique
-Surveille des canaux Telegram sources et transfère les vidéos vers votre canal,
-en supprimant les références aux canaux sources.
+Surveille des canaux Telegram sources et transfère les vidéos vers votre canal.
+Tout tourne dans le même event loop asyncio pour éviter les conflits.
 """
 
 import os
-import sys
 import logging
 import asyncio
-import threading
 
 from channels_config import load_channels
 from forwarder import run_userbot
@@ -23,22 +21,18 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def run_command_bot():
-    """Lance le bot de commandes dans un thread séparé."""
-    import asyncio
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-    app = create_bot_app()
+async def run_command_bot_async(app):
+    """Lance le bot de commandes de manière asynchrone."""
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling(drop_pending_updates=True)
     logger.info("🎮 Bot de commandes démarré")
-    app.run_polling(drop_pending_updates=True)
 
 
 async def main():
     logger.info("🚀 Bot Anime VF — Transfert automatique démarré")
     logger.info(f"📡 Canal cible: {os.environ.get('TELEGRAM_CHANNEL_ID', '?')}")
 
-    # Nettoyage des vieux messages
     cleaned = cleanup_old_forwarded()
     if cleaned:
         logger.info(f"🧹 {cleaned} anciens messages nettoyés")
@@ -49,13 +43,17 @@ async def main():
     else:
         logger.info("⚠️  Aucun canal source — envoyez /addcanal @nomcanal à votre bot pour en ajouter")
 
-    # Lancer le bot de commandes dans un thread séparé
-    cmd_thread = threading.Thread(target=run_command_bot, daemon=True)
-    cmd_thread.start()
-    logger.info("✅ Bot de commandes lancé en arrière-plan")
+    # Lancer le bot de commandes en tâche de fond
+    app = create_bot_app()
+    asyncio.create_task(run_command_bot_async(app))
 
-    # Lancer le userbot Telethon (bloquant)
+    # Lancer le userbot Telethon (bloquant jusqu'à déconnexion)
     await run_userbot(load_channels)
+
+    # Arrêt propre
+    await app.updater.stop()
+    await app.stop()
+    await app.shutdown()
 
 
 if __name__ == "__main__":
