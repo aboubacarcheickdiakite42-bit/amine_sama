@@ -41,12 +41,46 @@ def is_video_message(message) -> bool:
                 fname = attr.file_name.lower()
                 if any(fname.endswith(ext) for ext in [".mp4", ".mkv", ".avi", ".mov", ".webm"]):
                     return True
-        # Vérifier le mime type
         if hasattr(doc, "mime_type") and doc.mime_type:
             if "video" in doc.mime_type:
                 return True
 
     return False
+
+
+def get_message_text_content(message) -> str:
+    """Extrait tout le texte disponible d'un message (caption, nom de fichier, texte)."""
+    parts = []
+    if message.text:
+        parts.append(message.text)
+    if message.media and isinstance(message.media, MessageMediaDocument):
+        doc = message.media.document
+        if doc:
+            for attr in doc.attributes:
+                if isinstance(attr, DocumentAttributeFilename):
+                    parts.append(attr.file_name)
+    return " ".join(parts).lower()
+
+
+def passes_keyword_filter(message) -> tuple[bool, str]:
+    """
+    Vérifie si un message passe le filtre de mots-clés VF.
+    Retourne (True, raison) si accepté, (False, raison) si rejeté.
+    Si aucun filtre n'est configuré, tout passe.
+    """
+    from channels_config import load_keywords
+    keywords = load_keywords()
+
+    # Aucun filtre configuré → tout passe
+    if not keywords:
+        return True, "pas de filtre"
+
+    content = get_message_text_content(message)
+    for kw in keywords:
+        if kw.lower() in content:
+            return True, f"mot-clé '{kw}' trouvé"
+
+    return False, f"aucun mot-clé trouvé dans: {content[:80]}"
 
 
 def clean_caption(text: str, source_channel: str) -> str | None:
@@ -106,11 +140,12 @@ async def forward_message(client: TelegramClient, message, source_channel: str) 
 async def scan_and_forward_history(client: TelegramClient, source_channel: str, limit: int = 50) -> int:
     """
     Parcourt l'historique récent d'un canal source et transfère
-    les vidéos qui n'ont pas encore été transférées.
+    les vidéos qui passent le filtre de mots-clés.
     """
     from state_forwarder import is_message_forwarded, mark_message_forwarded
 
     forwarded = 0
+    skipped = 0
     try:
         entity = await client.get_entity(source_channel)
         async for message in client.iter_messages(entity, limit=limit):
@@ -121,16 +156,25 @@ async def scan_and_forward_history(client: TelegramClient, source_channel: str, 
             if is_message_forwarded(msg_key):
                 continue
 
-            logger.info(f"[{source_channel}] Nouveau message vidéo trouvé: ID {message.id}")
+            # Vérifier le filtre mots-clés
+            passed, reason = passes_keyword_filter(message)
+            if not passed:
+                logger.info(f"[{source_channel}] ⏭️ Ignoré (filtre): {reason}")
+                skipped += 1
+                continue
+
+            logger.info(f"[{source_channel}] ✅ Vidéo acceptée ({reason}): ID {message.id}")
             success = await forward_message(client, message, source_channel)
             if success:
                 mark_message_forwarded(msg_key)
                 forwarded += 1
-                await asyncio.sleep(3)  # Délai entre envois
+                await asyncio.sleep(3)
 
     except Exception as e:
         logger.error(f"Erreur scan {source_channel}: {e}")
 
+    if skipped:
+        logger.info(f"[{source_channel}] {skipped} vidéo(s) ignorée(s) par le filtre")
     return forwarded
 
 
@@ -191,7 +235,13 @@ async def run_userbot(source_channels_getter):
             if is_message_forwarded(msg_key):
                 return
 
-            logger.info(f"🔔 Nouveau message vidéo depuis {matched_channel}")
+            # Vérifier le filtre mots-clés
+            passed, reason = passes_keyword_filter(event.message)
+            if not passed:
+                logger.info(f"🔔 [{matched_channel}] Vidéo ignorée (filtre): {reason}")
+                return
+
+            logger.info(f"🔔 Nouveau message vidéo depuis {matched_channel} ({reason})")
             success = await forward_message(client, event.message, matched_channel)
             if success:
                 mark_message_forwarded(msg_key)

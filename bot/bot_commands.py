@@ -11,7 +11,7 @@ from telegram import Update
 from telegram.ext import ContextTypes, Application, CommandHandler
 from telegram.constants import ParseMode
 
-from channels_config import load_channels, add_channel, remove_channel
+from channels_config import load_channels, add_channel, remove_channel, load_keywords, set_keywords, clear_keywords
 from state_forwarder import get_forwarded_count
 
 logger = logging.getLogger(__name__)
@@ -25,11 +25,16 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🤖 <b>Bot Anime VF — Transfert automatique</b>\n\n"
         "Je surveille vos canaux sources et transfère automatiquement "
         "les vidéos vers votre canal.\n\n"
-        "<b>Commandes :</b>\n"
+        "<b>📡 Canaux :</b>\n"
         "/addcanal @nom — Ajouter un canal source\n"
         "/removecanal @nom — Supprimer un canal source\n"
-        "/canaux — Voir les canaux surveillés\n"
-        "/stats — Statistiques du bot\n"
+        "/canaux — Voir les canaux surveillés\n\n"
+        "<b>🔍 Filtre :</b>\n"
+        "/setfiltre vf french — N'envoyer que les vidéos VF\n"
+        "/filtre — Voir le filtre actif\n"
+        "/clearfiltre — Désactiver le filtre\n\n"
+        "<b>📊 Autre :</b>\n"
+        "/stats — Statistiques\n"
         "/help — Cette aide"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
@@ -137,6 +142,62 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 
+async def cmd_setfiltre(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Commande /setfiltre mot1 mot2 — définit les mots-clés de filtre."""
+    if not context.args:
+        await update.message.reply_text(
+            "❌ Usage: /setfiltre vf french\n\n"
+            "Le bot ne transférera que les vidéos dont le nom de fichier ou le texte contient ces mots.\n\n"
+            "Exemple: /setfiltre vf french vostfr\n\n"
+            "Pour désactiver le filtre (tout transférer): /clearfiltre",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    keywords = [kw.lower().strip() for kw in context.args if kw.strip()]
+    set_keywords(keywords)
+
+    lines = [
+        "✅ <b>Filtre mis à jour !</b>",
+        "",
+        "Mots-clés actifs :",
+    ]
+    for kw in keywords:
+        lines.append(f"  • <code>{kw}</code>")
+    lines.append("")
+    lines.append("Seules les vidéos contenant un de ces mots seront transférées.")
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+    logger.info(f"Filtre mis à jour par {update.effective_user.id}: {keywords}")
+
+
+async def cmd_filtre(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Commande /filtre — affiche les mots-clés de filtre actifs."""
+    keywords = load_keywords()
+    if not keywords:
+        await update.message.reply_text(
+            "🔓 <b>Aucun filtre actif</b> — toutes les vidéos sont transférées.\n\n"
+            "Pour activer un filtre: /setfiltre vf french",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    lines = ["🔍 <b>Filtre actif — mots-clés :</b>", ""]
+    for kw in keywords:
+        lines.append(f"  • <code>{kw}</code>")
+    lines.append("")
+    lines.append("Pour modifier: /setfiltre mot1 mot2\nPour désactiver: /clearfiltre")
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+
+async def cmd_clearfiltre(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Commande /clearfiltre — désactive tous les filtres."""
+    clear_keywords()
+    await update.message.reply_text(
+        "🔓 Filtre désactivé — toutes les vidéos seront désormais transférées.",
+        parse_mode=ParseMode.HTML
+    )
+
+
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await cmd_start(update, context)
 
@@ -150,4 +211,7 @@ def create_bot_app() -> Application:
     app.add_handler(CommandHandler("removecanal", cmd_removecanal))
     app.add_handler(CommandHandler("canaux", cmd_canaux))
     app.add_handler(CommandHandler("stats", cmd_stats))
+    app.add_handler(CommandHandler("setfiltre", cmd_setfiltre))
+    app.add_handler(CommandHandler("filtre", cmd_filtre))
+    app.add_handler(CommandHandler("clearfiltre", cmd_clearfiltre))
     return app
