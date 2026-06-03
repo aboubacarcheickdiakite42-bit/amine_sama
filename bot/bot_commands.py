@@ -5,6 +5,7 @@ Permet de gérer les canaux sources depuis Telegram.
 
 import logging
 import os
+import asyncio
 from datetime import datetime
 
 from telegram import Update
@@ -34,6 +35,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/filtre — Voir le filtre actif\n"
         "/clearfiltre — Désactiver le filtre\n\n"
         "<b>📊 Autre :</b>\n"
+        "/scan @canal — Re-scanner l'historique d'un canal\n"
         "/stats — Statistiques\n"
         "/help — Cette aide"
     )
@@ -189,6 +191,62 @@ async def cmd_filtre(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 
+async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Commande /scan @canal — force un re-scan complet de l'historique d'un canal."""
+    channels = load_channels()
+
+    if not context.args:
+        if not channels:
+            await update.message.reply_text("❌ Aucun canal configuré. Ajoutez-en avec /addcanal @nom")
+            return
+        # Scan de tous les canaux configurés
+        targets = channels
+    else:
+        targets = []
+        for arg in context.args:
+            ch = arg.strip()
+            if not ch.startswith("@"):
+                ch = "@" + ch
+            targets.append(ch)
+
+    await update.message.reply_text(
+        f"🔄 Scan en cours de {len(targets)} canal(aux)...\nCela peut prendre plusieurs minutes.",
+        parse_mode=ParseMode.HTML
+    )
+
+    # Lancer le scan en tâche de fond pour ne pas bloquer
+    asyncio.create_task(_do_scan(update, targets))
+
+
+async def _do_scan(update, targets: list[str]):
+    """Effectue le scan en arrière-plan et envoie le résultat."""
+    from forwarder import scan_and_forward_history, SESSION_FILE
+    from config import get_telethon_credentials
+    from telethon import TelegramClient
+
+    API_ID, API_HASH, PHONE = get_telethon_credentials()
+    total = 0
+    results = []
+
+    try:
+        client = TelegramClient(SESSION_FILE, API_ID, API_HASH)
+        await client.start(phone=PHONE)
+
+        for ch in targets:
+            count = await scan_and_forward_history(client, ch, limit=100)
+            results.append(f"• {ch} → {count} vidéo(s) transférée(s)")
+            total += count
+
+        await client.disconnect()
+
+        lines = [f"✅ <b>Scan terminé !</b>", "", f"Total : <b>{total} vidéo(s)</b> transférée(s)", ""]
+        lines.extend(results)
+        await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur lors du scan : {e}")
+
+
 async def cmd_clearfiltre(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Commande /clearfiltre — désactive tous les filtres."""
     clear_keywords()
@@ -214,4 +272,5 @@ def create_bot_app() -> Application:
     app.add_handler(CommandHandler("setfiltre", cmd_setfiltre))
     app.add_handler(CommandHandler("filtre", cmd_filtre))
     app.add_handler(CommandHandler("clearfiltre", cmd_clearfiltre))
+    app.add_handler(CommandHandler("scan", cmd_scan))
     return app
