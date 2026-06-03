@@ -75,23 +75,31 @@ def get_filename(message) -> str | None:
 
 def passes_keyword_filter(message) -> tuple[bool, str]:
     """
-    Vérifie si un message passe le filtre de mots-clés VF.
-    Retourne (True, raison) si accepté, (False, raison) si rejeté.
-    Si aucun filtre n'est configuré, tout passe.
+    Vérifie si un message passe le filtre VF.
+    Règle fixe : VOSTFR est TOUJOURS rejeté, peu importe les mots-clés configurés.
+    Si des mots-clés VF sont configurés, la vidéo doit en contenir un.
     """
     from channels_config import load_keywords
-    keywords = load_keywords()
-
-    # Aucun filtre configuré → tout passe
-    if not keywords:
-        return True, "pas de filtre"
+    from series_utils import is_vostfr, is_vf
 
     content = get_message_text_content(message)
+
+    # Règle 1 (fixe) : bloquer VOSTFR quoi qu'il arrive
+    if is_vostfr(content):
+        return False, f"contenu VOSTFR rejeté"
+
+    keywords = load_keywords()
+
+    # Aucun filtre configuré → tout passe (VOSTFR déjà bloqué ci-dessus)
+    if not keywords:
+        return True, "pas de filtre (non-VOSTFR)"
+
+    # Avec filtre configuré : doit contenir un mot-clé
     for kw in keywords:
         if kw.lower() in content:
             return True, f"mot-clé '{kw}' trouvé"
 
-    return False, f"aucun mot-clé trouvé dans: {content[:80]}"
+    return False, f"aucun mot-clé VF trouvé"
 
 
 def clean_caption(text: str, source_channel: str) -> str | None:
@@ -164,12 +172,60 @@ async def forward_message(client: TelegramClient, message, source_channel: str) 
         return False
 
 
+async def post_series_header(client: TelegramClient, series_key: str, series_title: str, cover_url: str | None = None) -> bool:
+    """
+    Poste une affiche/bannière avant le premier épisode d'une série.
+    Essaie d'abord avec une image de couverture, sinon un message texte.
+    """
+    from state_forwarder import is_series_header_posted, mark_series_header_posted
+
+    if is_series_header_posted(series_key):
+        return False  # Déjà posté
+
+    caption = f"🎬 <b>{series_title}</b>"
+
+    try:
+        if cover_url:
+            await client.send_file(
+                TARGET_CHANNEL,
+                file=cover_url,
+                caption=caption,
+                parse_mode="html",
+            )
+            logger.info(f"🖼️ Affiche postée pour '{series_title}'")
+        else:
+            # Pas d'image → bannière texte
+            banner = (
+                f"━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🎬 <b>{series_title}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━"
+            )
+            await client.send_message(TARGET_CHANNEL, banner, parse_mode="html")
+            logger.info(f"📝 Bannière texte postée pour '{series_title}'")
+
+        mark_series_header_posted(series_key)
+        await asyncio.sleep(1)
+        return True
+
+    except Exception as e:
+        logger.warning(f"⚠️ Impossible de poster l'affiche pour '{series_title}': {e}")
+        return False
+
+
 async def scan_and_forward_history(client: TelegramClient, source_channel: str, limit: int = 50) -> int:
     """
-    Parcourt l'historique récent d'un canal source et transfère
-    les vidéos qui passent le filtre de mots-clés.
+    Parcourt l'historique d'un canal source et transfère les vidéos VF.
+    Stratégie :
+    1. Collecte tous les messages vidéo VF du canal
+    2. Groupe par série
+    3. Poste en priorité les séries COMPLÈTES (EP01 → fin), avec affiche
+    4. Puis les épisodes orphelins / séries incomplètes
     """
     from state_forwarder import is_message_forwarded, mark_message_forwarded, is_paused
+    from series_utils import (
+        group_messages_by_series, is_series_complete,
+        get_series_title_clean, fetch_anime_cover, parse_series_info
+    )
 
     if is_paused():
         logger.info(f"[{source_channel}] ⏸️ Bot en pause — scan ignoré")
@@ -177,35 +233,84 @@ async def scan_and_forward_history(client: TelegramClient, source_channel: str, 
 
     forwarded = 0
     skipped = 0
+
     try:
         entity = await client.get_entity(source_channel)
+
+        # Étape 1 : Collecter tous les messages vidéo VF non encore transférés
+        candidates = []
         async for message in client.iter_messages(entity, limit=limit):
             if not is_video_message(message):
                 continue
-
             msg_key = f"{source_channel}:{message.id}"
             if is_message_forwarded(msg_key):
                 continue
-
-            # Vérifier le filtre mots-clés
             passed, reason = passes_keyword_filter(message)
             if not passed:
-                logger.info(f"[{source_channel}] ⏭️ Ignoré (filtre): {reason}")
+                logger.debug(f"[{source_channel}] Ignoré ({reason}): ID {message.id}")
                 skipped += 1
                 continue
+            candidates.append(message)
 
-            logger.info(f"[{source_channel}] ✅ Vidéo acceptée ({reason}): ID {message.id}")
-            success = await forward_message(client, message, source_channel)
+        if not candidates:
+            if skipped:
+                logger.info(f"[{source_channel}] {skipped} vidéo(s) ignorée(s) (VOSTFR/filtre)")
+            return 0
+
+        logger.info(f"[{source_channel}] {len(candidates)} vidéo(s) VF à transférer, {skipped} ignorée(s)")
+
+        # Étape 2 : Grouper par série
+        groups, ungrouped = group_messages_by_series(candidates)
+
+        # Étape 3 : Séparer séries complètes / incomplètes
+        complete_series = {}
+        incomplete_series = {}
+        for key, episodes in groups.items():
+            if is_series_complete(episodes):
+                complete_series[key] = episodes
+            else:
+                incomplete_series[key] = episodes
+
+        logger.info(
+            f"[{source_channel}] Séries complètes: {len(complete_series)} | "
+            f"Incomplètes: {len(incomplete_series)} | "
+            f"Orphelins: {len(ungrouped)}"
+        )
+
+        async def send_episode(msg, series_key=None, series_info=None):
+            nonlocal forwarded
+            # Poster l'affiche avant le 1er épisode (EP01) d'une série
+            if series_info and series_info["episode"] == 1 and series_key:
+                title = get_series_title_clean(series_info)
+                cover_url = await fetch_anime_cover(series_info["title"])
+                await post_series_header(client, series_key, title, cover_url)
+
+            success = await forward_message(client, msg, source_channel)
             if success:
+                msg_key = f"{source_channel}:{msg.id}"
                 mark_message_forwarded(msg_key)
                 forwarded += 1
-                await asyncio.sleep(3)
+                await asyncio.sleep(2)
+
+        # Étape 4a : Séries complètes EN PREMIER (dans l'ordre des épisodes)
+        for key, episodes in complete_series.items():
+            logger.info(f"[{source_channel}] 📺 Série complète: {key} ({len(episodes)} épisodes)")
+            for ep_num, msg, info in episodes:
+                await send_episode(msg, key, info)
+
+        # Étape 4b : Séries incomplètes (dans l'ordre des épisodes)
+        for key, episodes in incomplete_series.items():
+            logger.info(f"[{source_channel}] 📺 Série incomplète: {key} ({len(episodes)} épisodes)")
+            for ep_num, msg, info in episodes:
+                await send_episode(msg, key, info)
+
+        # Étape 4c : Épisodes orphelins (non reconnus par le parseur)
+        for msg in ungrouped:
+            await send_episode(msg)
 
     except Exception as e:
-        logger.error(f"Erreur scan {source_channel}: {e}")
+        logger.error(f"Erreur scan {source_channel}: {e}", exc_info=True)
 
-    if skipped:
-        logger.info(f"[{source_channel}] {skipped} vidéo(s) ignorée(s) par le filtre")
     return forwarded
 
 
@@ -303,13 +408,24 @@ async def run_userbot(source_channels_getter):
             if is_message_forwarded(msg_key):
                 return
 
-            # Vérifier le filtre mots-clés
+            # Vérifier le filtre VF / bloquer VOSTFR
             passed, reason = passes_keyword_filter(event.message)
             if not passed:
-                logger.info(f"🔔 [{matched_channel}] Vidéo ignorée (filtre): {reason}")
+                logger.info(f"🔔 [{matched_channel}] Ignoré ({reason})")
                 return
 
-            logger.info(f"🔔 Nouveau message vidéo depuis {matched_channel} ({reason})")
+            # Poster l'affiche si c'est le 1er épisode d'une nouvelle série
+            from series_utils import parse_series_info, get_series_title_clean, fetch_anime_cover
+            fname = get_filename(event.message)
+            if fname:
+                info = parse_series_info(fname)
+                if info and info["episode"] == 1:
+                    series_key = info["series_key"]
+                    title = get_series_title_clean(info)
+                    cover_url = await fetch_anime_cover(info["title"])
+                    await post_series_header(client, series_key, title, cover_url)
+
+            logger.info(f"🔔 Nouvel épisode VF depuis {matched_channel}: {fname or 'inconnu'}")
             success = await forward_message(client, event.message, matched_channel)
             if success:
                 mark_message_forwarded(msg_key)

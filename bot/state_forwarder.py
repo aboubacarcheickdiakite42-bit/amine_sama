@@ -101,6 +101,23 @@ def get_published_filenames_count() -> int:
     return len(load_forward_state().get("filenames", {}))
 
 
+# --- Tracking des headers de séries déjà postés ---
+
+def is_series_header_posted(series_key: str) -> bool:
+    """Retourne True si le header (affiche) de cette série a déjà été posté."""
+    state = load_forward_state()
+    return series_key in state.get("series_headers", {})
+
+
+def mark_series_header_posted(series_key: str) -> None:
+    """Marque le header d'une série comme posté."""
+    state = load_forward_state()
+    if "series_headers" not in state:
+        state["series_headers"] = {}
+    state["series_headers"][series_key] = datetime.now().isoformat()
+    save_forward_state(state)
+
+
 # --- Gestion de l'état pause ---
 
 def is_paused() -> bool:
