@@ -13,7 +13,7 @@ from telegram.ext import ContextTypes, Application, CommandHandler
 from telegram.constants import ParseMode
 
 from channels_config import load_channels, add_channel, remove_channel, load_keywords, set_keywords, clear_keywords
-from state_forwarder import get_forwarded_count
+from state_forwarder import get_forwarded_count, is_paused, set_paused, get_paused_since
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +34,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/setfiltre vf french — N'envoyer que les vidéos VF\n"
         "/filtre — Voir le filtre actif\n"
         "/clearfiltre — Désactiver le filtre\n\n"
+        "<b>⚙️ Contrôle :</b>\n"
+        "/pause — Mettre le bot en pause\n"
+        "/reprendre — Relancer le bot\n\n"
         "<b>📊 Autre :</b>\n"
         "/scan @canal 200 — Re-scanner l'historique (limite optionnelle)\n"
         "/stats — Statistiques\n"
@@ -262,6 +265,46 @@ async def _do_scan(update, targets: list[str], limit: int = 100):
         await update.message.reply_text(f"❌ Erreur lors du scan : {e}")
 
 
+async def cmd_pause(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Commande /pause — met le bot en pause."""
+    if is_paused():
+        await update.message.reply_text(
+            "⏸️ Le bot est <b>déjà en pause</b>.\nUtilise /reprendre pour relancer.",
+            parse_mode=ParseMode.HTML
+        )
+        return
+    set_paused(True)
+    await update.message.reply_text(
+        "⏸️ <b>Bot mis en pause.</b>\n\n"
+        "Les nouveaux messages ne seront plus transférés.\n"
+        "Utilise /reprendre pour relancer.",
+        parse_mode=ParseMode.HTML
+    )
+    logger.info(f"Bot mis en pause par {update.effective_user.id}")
+
+
+async def cmd_reprendre(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Commande /reprendre — relance le bot après une pause."""
+    if not is_paused():
+        await update.message.reply_text(
+            "▶️ Le bot est <b>déjà actif</b>, rien à faire.",
+            parse_mode=ParseMode.HTML
+        )
+        return
+    paused_since = get_paused_since()
+    set_paused(False)
+    msg = "▶️ <b>Bot relancé !</b>\n\nLes vidéos seront à nouveau transférées automatiquement."
+    if paused_since:
+        try:
+            from datetime import datetime
+            dt = datetime.fromisoformat(paused_since)
+            msg += f"\n\n<i>En pause depuis : {dt.strftime('%d/%m/%Y %H:%M')}</i>"
+        except Exception:
+            pass
+    await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
+    logger.info(f"Bot relancé par {update.effective_user.id}")
+
+
 async def cmd_clearfiltre(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Commande /clearfiltre — désactive tous les filtres."""
     clear_keywords()
@@ -288,4 +331,6 @@ def create_bot_app() -> Application:
     app.add_handler(CommandHandler("filtre", cmd_filtre))
     app.add_handler(CommandHandler("clearfiltre", cmd_clearfiltre))
     app.add_handler(CommandHandler("scan", cmd_scan))
+    app.add_handler(CommandHandler("pause", cmd_pause))
+    app.add_handler(CommandHandler("reprendre", cmd_reprendre))
     return app

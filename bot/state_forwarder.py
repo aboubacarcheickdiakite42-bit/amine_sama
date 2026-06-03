@@ -59,3 +59,28 @@ def cleanup_old_forwarded() -> int:
         state["forwarded"] = forwarded
         save_forward_state(state)
     return len(to_delete)
+
+
+# --- Gestion de l'état pause ---
+
+def is_paused() -> bool:
+    """Retourne True si le bot est en pause."""
+    state = load_forward_state()
+    return state.get("paused", False)
+
+
+def set_paused(paused: bool) -> None:
+    """Active ou désactive la pause."""
+    state = load_forward_state()
+    state["paused"] = paused
+    if paused:
+        state["paused_at"] = datetime.now().isoformat()
+    else:
+        state.pop("paused_at", None)
+    save_forward_state(state)
+
+
+def get_paused_since() -> str | None:
+    """Retourne la date de mise en pause, ou None."""
+    state = load_forward_state()
+    return state.get("paused_at")

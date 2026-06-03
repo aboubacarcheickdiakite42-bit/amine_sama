@@ -142,7 +142,11 @@ async def scan_and_forward_history(client: TelegramClient, source_channel: str, 
     Parcourt l'historique récent d'un canal source et transfère
     les vidéos qui passent le filtre de mots-clés.
     """
-    from state_forwarder import is_message_forwarded, mark_message_forwarded
+    from state_forwarder import is_message_forwarded, mark_message_forwarded, is_paused
+
+    if is_paused():
+        logger.info(f"[{source_channel}] ⏸️ Bot en pause — scan ignoré")
+        return 0
 
     forwarded = 0
     skipped = 0
@@ -229,6 +233,12 @@ async def run_userbot(source_channels_getter):
                 return
 
             if not is_video_message(event.message):
+                return
+
+            # Vérifier l'état pause
+            from state_forwarder import is_paused
+            if is_paused():
+                logger.info(f"🔔 [{matched_channel}] ⏸️ Bot en pause — message ignoré")
                 return
 
             msg_key = f"{matched_channel}:{event.message.id}"
