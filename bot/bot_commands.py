@@ -35,7 +35,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/filtre — Voir le filtre actif\n"
         "/clearfiltre — Désactiver le filtre\n\n"
         "<b>📊 Autre :</b>\n"
-        "/scan @canal — Re-scanner l'historique d'un canal\n"
+        "/scan @canal 200 — Re-scanner l'historique (limite optionnelle)\n"
         "/stats — Statistiques\n"
         "/help — Cette aide"
     )
@@ -192,33 +192,42 @@ async def cmd_filtre(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Commande /scan @canal — force un re-scan complet de l'historique d'un canal."""
+    """
+    /scan — scanner tous les canaux configurés (100 derniers messages)
+    /scan @canal — scanner un canal spécifique
+    /scan @canal 200 — scanner avec une limite personnalisée
+    /scan @canal1 @canal2 300 — scanner plusieurs canaux avec limite
+    """
     channels = load_channels()
+    args = list(context.args) if context.args else []
 
-    if not context.args:
+    # Extraire la limite si le dernier argument est un nombre
+    limit = 100
+    if args and args[-1].isdigit():
+        limit = max(10, min(int(args[-1]), 500))  # entre 10 et 500
+        args = args[:-1]
+
+    if not args:
         if not channels:
             await update.message.reply_text("❌ Aucun canal configuré. Ajoutez-en avec /addcanal @nom")
             return
-        # Scan de tous les canaux configurés
         targets = channels
     else:
         targets = []
-        for arg in context.args:
-            ch = arg.strip()
-            if not ch.startswith("@"):
-                ch = "@" + ch
-            targets.append(ch)
+        for arg in args:
+            ch = arg.strip().lstrip("@")
+            targets.append(f"@{ch}")
 
     await update.message.reply_text(
-        f"🔄 Scan en cours de {len(targets)} canal(aux)...\nCela peut prendre plusieurs minutes.",
+        f"🔄 Scan de <b>{len(targets)} canal(aux)</b> — {limit} derniers messages par canal...\n"
+        f"Je vous préviens quand c'est terminé.",
         parse_mode=ParseMode.HTML
     )
 
-    # Lancer le scan en tâche de fond pour ne pas bloquer
-    asyncio.create_task(_do_scan(update, targets))
+    asyncio.create_task(_do_scan(update, targets, limit))
 
 
-async def _do_scan(update, targets: list[str]):
+async def _do_scan(update, targets: list[str], limit: int = 100):
     """Effectue le scan en arrière-plan et envoie le résultat."""
     from forwarder import scan_and_forward_history, SESSION_FILE
     from config import get_telethon_credentials
@@ -233,13 +242,19 @@ async def _do_scan(update, targets: list[str]):
         await client.start(phone=PHONE)
 
         for ch in targets:
-            count = await scan_and_forward_history(client, ch, limit=100)
-            results.append(f"• {ch} → {count} vidéo(s) transférée(s)")
+            count = await scan_and_forward_history(client, ch, limit=limit)
+            results.append(f"• {ch} → {count} vidéo(s)")
             total += count
 
         await client.disconnect()
 
-        lines = [f"✅ <b>Scan terminé !</b>", "", f"Total : <b>{total} vidéo(s)</b> transférée(s)", ""]
+        lines = [
+            f"✅ <b>Scan terminé !</b>",
+            f"Limite : {limit} messages/canal",
+            "",
+            f"Total : <b>{total} vidéo(s)</b> transférée(s)",
+            "",
+        ]
         lines.extend(results)
         await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
