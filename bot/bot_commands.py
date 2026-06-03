@@ -13,7 +13,7 @@ from telegram.ext import ContextTypes, Application, CommandHandler
 from telegram.constants import ParseMode
 
 from channels_config import load_channels, add_channel, remove_channel, load_keywords, set_keywords, clear_keywords
-from state_forwarder import get_forwarded_count, is_paused, set_paused, get_paused_since
+from state_forwarder import get_forwarded_count, is_paused, set_paused, get_paused_since, get_published_filenames_count
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +38,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/pause — Mettre le bot en pause\n"
         "/reprendre — Relancer le bot\n\n"
         "<b>📊 Autre :</b>\n"
-        "/scan @canal 200 — Re-scanner l'historique (limite optionnelle)\n"
-        "/stats — Statistiques\n"
+        "/scan @canal 200 — Re-scanner l'historique\n"
+        "/doublons — Voir l'index anti-doublon\n"
+        "/stats — Statistiques complètes\n"
         "/help — Cette aide"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
@@ -127,15 +128,23 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Statistiques du bot."""
     channels = load_channels()
     total_forwarded = get_forwarded_count()
+    total_filenames = get_published_filenames_count()
+    keywords = load_keywords()
+    paused = is_paused()
     uptime = datetime.now() - _bot_start_time
     uptime_str = f"{int(uptime.total_seconds() // 3600)}h {int((uptime.total_seconds() % 3600) // 60)}min"
 
+    status = "⏸️ En pause" if paused else "🟢 Actif"
     lines = [
         "📊 <b>Statistiques du Bot</b>",
         "",
+        f"État : {status}",
+        f"⏱️ <b>En ligne depuis :</b> {uptime_str}",
+        "",
         f"📡 <b>Canaux surveillés :</b> {len(channels)}",
         f"📺 <b>Vidéos transférées :</b> {total_forwarded}",
-        f"🟢 <b>En ligne depuis :</b> {uptime_str}",
+        f"🔒 <b>Doublons bloqués (index) :</b> {total_filenames} fichiers indexés",
+        f"🔍 <b>Filtre actif :</b> {', '.join(keywords) if keywords else 'aucun'}",
     ]
 
     if channels:
@@ -145,6 +154,68 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines.append(f"  • {ch}")
 
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+
+async def cmd_doublons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Commande /doublons — affiche les stats anti-doublon et permet de ré-indexer."""
+    from state_forwarder import get_published_filenames_count, load_forward_state
+
+    total = get_published_filenames_count()
+
+    if context.args and context.args[0].lower() == "reindex":
+        await update.message.reply_text(
+            "🔄 Ré-indexation du canal en cours...",
+            parse_mode=ParseMode.HTML
+        )
+        asyncio.create_task(_do_reindex(update))
+        return
+
+    state = load_forward_state()
+    filenames = state.get("filenames", {})
+
+    # Afficher les 10 derniers fichiers indexés
+    recent = sorted(filenames.items(), key=lambda x: x[1], reverse=True)[:10]
+
+    lines = [
+        "🔒 <b>Protection anti-doublon</b>",
+        "",
+        f"Fichiers indexés : <b>{total}</b>",
+        "",
+        "Les vidéos avec un nom déjà connu sont automatiquement ignorées,",
+        "même si elles viennent d'un canal source différent.",
+        "",
+    ]
+
+    if recent:
+        lines.append("<b>10 derniers fichiers indexés :</b>")
+        for fname, date in recent:
+            date_str = date[:10]
+            lines.append(f"  • <code>{fname[:50]}</code> ({date_str})")
+        lines.append("")
+
+    lines.append("Pour ré-indexer l'historique du canal : /doublons reindex")
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+
+async def _do_reindex(update):
+    """Ré-indexe le canal cible en arrière-plan."""
+    from forwarder import index_target_channel, SESSION_FILE
+    from config import get_telethon_credentials
+    from telethon import TelegramClient
+
+    API_ID, API_HASH, PHONE = get_telethon_credentials()
+    try:
+        client = TelegramClient(SESSION_FILE, API_ID, API_HASH)
+        await client.start(phone=PHONE)
+        count = await index_target_channel(client, limit=500)
+        await client.disconnect()
+        total = get_published_filenames_count()
+        await update.message.reply_text(
+            f"✅ Ré-indexation terminée !\n{count} vidéos scannées\n{total} fichiers dans l'index",
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur ré-indexation : {e}")
 
 
 async def cmd_setfiltre(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -333,4 +404,5 @@ def create_bot_app() -> Application:
     app.add_handler(CommandHandler("scan", cmd_scan))
     app.add_handler(CommandHandler("pause", cmd_pause))
     app.add_handler(CommandHandler("reprendre", cmd_reprendre))
+    app.add_handler(CommandHandler("doublons", cmd_doublons))
     return app

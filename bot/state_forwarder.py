@@ -61,6 +61,46 @@ def cleanup_old_forwarded() -> int:
     return len(to_delete)
 
 
+# --- Déduplication par nom de fichier ---
+
+def _normalize_filename(filename: str) -> str:
+    """Normalise un nom de fichier pour comparaison (minuscules, sans espaces multiples)."""
+    import re
+    name = filename.lower().strip()
+    # Supprimer l'extension
+    name = re.sub(r'\.(mp4|mkv|avi|mov|webm)$', '', name)
+    # Normaliser les espaces
+    name = re.sub(r'\s+', ' ', name)
+    return name
+
+
+def is_filename_published(filename: str) -> tuple[bool, str]:
+    """
+    Vérifie si une vidéo avec ce nom de fichier a déjà été publiée.
+    Retourne (True, date) si déjà publiée, (False, '') sinon.
+    """
+    state = load_forward_state()
+    filenames = state.get("filenames", {})
+    key = _normalize_filename(filename)
+    if key in filenames:
+        return True, filenames[key]
+    return False, ""
+
+
+def mark_filename_published(filename: str) -> None:
+    """Enregistre le nom de fichier comme déjà publié."""
+    state = load_forward_state()
+    if "filenames" not in state:
+        state["filenames"] = {}
+    key = _normalize_filename(filename)
+    state["filenames"][key] = datetime.now().isoformat()
+    save_forward_state(state)
+
+
+def get_published_filenames_count() -> int:
+    return len(load_forward_state().get("filenames", {}))
+
+
 # --- Gestion de l'état pause ---
 
 def is_paused() -> bool:

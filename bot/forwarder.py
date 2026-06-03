@@ -62,6 +62,17 @@ def get_message_text_content(message) -> str:
     return " ".join(parts).lower()
 
 
+def get_filename(message) -> str | None:
+    """Extrait le nom de fichier d'un message vidéo."""
+    if message.media and isinstance(message.media, MessageMediaDocument):
+        doc = message.media.document
+        if doc:
+            for attr in doc.attributes:
+                if isinstance(attr, DocumentAttributeFilename):
+                    return attr.file_name
+    return None
+
+
 def passes_keyword_filter(message) -> tuple[bool, str]:
     """
     Vérifie si un message passe le filtre de mots-clés VF.
@@ -113,11 +124,22 @@ async def forward_message(client: TelegramClient, message, source_channel: str) 
     """
     Transfère un message vidéo vers le canal cible.
     Re-envoie le fichier (sans forward tag) pour ne pas montrer la source.
+    Vérifie la déduplication par nom de fichier avant l'envoi.
     """
-    try:
-        caption = clean_caption(message.text or message.caption or "", source_channel)
+    from state_forwarder import is_filename_published, mark_filename_published
 
-        # Télécharger et renvoyer le fichier pour éviter le "forwarded from"
+    # Vérification anti-doublon par nom de fichier
+    fname = get_filename(message)
+    if fname:
+        already, published_at = is_filename_published(fname)
+        if already:
+            date_str = published_at[:10] if published_at else "date inconnue"
+            logger.info(f"⏭️ Doublon détecté '{fname}' — déjà publié le {date_str}")
+            return False
+
+    try:
+        caption = clean_caption(message.text or "", source_channel)
+
         await client.send_file(
             TARGET_CHANNEL,
             file=message.media,
@@ -125,7 +147,12 @@ async def forward_message(client: TelegramClient, message, source_channel: str) 
             supports_streaming=True,
             force_document=False,
         )
-        logger.info(f"✅ Vidéo transférée depuis {source_channel}")
+
+        # Enregistrer le nom de fichier après succès
+        if fname:
+            mark_filename_published(fname)
+
+        logger.info(f"✅ Vidéo transférée depuis {source_channel}" + (f" ({fname})" if fname else ""))
         return True
 
     except FloodWaitError as e:
@@ -182,11 +209,38 @@ async def scan_and_forward_history(client: TelegramClient, source_channel: str, 
     return forwarded
 
 
+async def index_target_channel(client: TelegramClient, limit: int = 200) -> int:
+    """
+    Scanne l'historique du canal cible (@drofficielle) et indexe
+    tous les noms de fichiers déjà publiés pour éviter les doublons futurs.
+    """
+    from state_forwarder import mark_filename_published, get_published_filenames_count
+
+    before = get_published_filenames_count()
+    indexed = 0
+    try:
+        entity = await client.get_entity(TARGET_CHANNEL)
+        async for message in client.iter_messages(entity, limit=limit):
+            if not is_video_message(message):
+                continue
+            fname = get_filename(message)
+            if fname:
+                mark_filename_published(fname)
+                indexed += 1
+        after = get_published_filenames_count()
+        new_entries = after - before
+        logger.info(f"📚 Index canal cible: {indexed} vidéos scannées, {new_entries} nouvelles entrées ({after} total)")
+    except Exception as e:
+        logger.warning(f"⚠️ Impossible d'indexer le canal cible: {e}")
+    return indexed
+
+
 async def run_userbot(source_channels_getter):
     """
     Lance le userbot Telethon :
-    1. Écoute les nouveaux messages en temps réel sur les canaux sources
-    2. Scanne aussi l'historique récent au démarrage
+    1. Indexe les vidéos déjà publiées dans le canal cible (anti-doublon)
+    2. Scanne l'historique récent des canaux sources
+    3. Écoute les nouveaux messages en temps réel
     """
     from state_forwarder import is_message_forwarded, mark_message_forwarded
 
@@ -195,6 +249,10 @@ async def run_userbot(source_channels_getter):
     await client.start(phone=PHONE)
     me = await client.get_me()
     logger.info(f"✅ Connecté en tant que: {me.first_name} (@{me.username})")
+
+    # Indexer l'historique du canal cible pour la déduplication par nom de fichier
+    logger.info(f"📚 Indexation du canal cible {TARGET_CHANNEL}...")
+    await index_target_channel(client, limit=200)
 
     # Scan initial de l'historique récent de chaque canal
     channels = source_channels_getter()
